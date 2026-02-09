@@ -5,3 +5,13 @@ tpch:
       type: duckdb
       path: "tpch.duckdb"
       threads: 4
+    base:
+      type: duckdb
+      path: "tpch.duckdb"
+      schema: base
+      threads: 4
+    current:
+      type: duckdb
+      path: "tpch.duckdb"
+      schema: current
+      threads: 4

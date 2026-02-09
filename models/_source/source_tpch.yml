@@ -2,14 +2,18 @@ version: 2
 
 sources:
   - name: tpch
-    schema: main
+    schema: raw
     loader: DuckDB TPC-H Extension
 
     tables:
       - name: customer
       - name: lineitem
+        config:
+          event_time: l_shipdate
       - name: nation
       - name: orders
+        config:
+          event_time: o_orderdate
       - name: part
       - name: partsupp
       - name: region
