@@ -32,6 +32,12 @@ models:
       +materialized: table
     wh:
       +materialized: table
+    intermediate:
+      +materialized: view
+    reports:
+      +materialized: table
+    metrics:
+      +materialized: table
 
 vars:
   max_ship_date: "'1998-12-01'"
