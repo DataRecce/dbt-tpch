@@ -1,24 +1,22 @@
-
-# Name your package! Package names should contain only lowercase characters
-# and underscores. A good package name should reflect your organization's
-# name or the intended use of these models
 name: 'dbt_tpch'
-version: '1.0'
+version: '2.0'
 
-source-paths: ["models"]
-analysis-paths: ["analysis"] 
+config-version: 2
+
+model-paths: ["models"]
+analysis-paths: ["analysis"]
 test-paths: ["tests"]
-data-paths: ["data"]
+seed-paths: ["data"]
 macro-paths: ["macros"]
 
-target-path: "target"  # directory which will store compiled SQL files
-clean-targets:         # directories to be removed by `dbt clean`
+target-path: "target"
+clean-targets:
     - "target"
-    - "dbt_modules"
+    - "dbt_packages"
 
 profile: tpch
 
-require-dbt-version: ">=0.13.1"
+require-dbt-version: ">=1.9.0"
 
 quoting:
     database: false
@@ -27,13 +25,13 @@ quoting:
 
 models:
   dbt_tpch:
+    +materialized: view
+    base:
+      +materialized: ephemeral
+    ods:
+      +materialized: table
+    wh:
+      +materialized: table
 
-      vars:
-        max_ship_date: "'1998-12-01'"
-
-      base:
-        schema: base
-      ods:
-        schema: ods
-      wh:
-        schema: wh
+vars:
+  max_ship_date: "'1998-12-01'"

@@ -2,15 +2,9 @@ version: 2
 
 sources:
   - name: tpch
-    database: SNOWFLAKE_SAMPLE_DATA
-    schema: TPCH_SF10
-    loader: Snowflake
-    
-    quoting:
-      database: false
-      schema: false
-      identifier: false
-      
+    schema: main
+    loader: DuckDB TPC-H Extension
+
     tables:
       - name: customer
       - name: lineitem
