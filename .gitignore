@@ -1,4 +1,5 @@
 target/
+target-base/
 dbt_modules/
 dbt_packages/
 logs/
