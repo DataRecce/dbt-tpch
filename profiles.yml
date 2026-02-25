@@ -1,6 +1,7 @@
 tpch:
   target: dev
   outputs:
+    # DuckDB targets
     dev:
       type: duckdb
       path: "tpch.duckdb"
@@ -13,5 +14,34 @@ tpch:
     current:
       type: duckdb
       path: "tpch.duckdb"
+      schema: current
+      threads: 4
+
+    # Postgres targets
+    pg-dev:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: dbt
+      password: dbt
+      dbname: tpch
+      schema: public
+      threads: 4
+    pg-base:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: dbt
+      password: dbt
+      dbname: tpch
+      schema: base
+      threads: 4
+    pg-current:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: dbt
+      password: dbt
+      dbname: tpch
       schema: current
       threads: 4
