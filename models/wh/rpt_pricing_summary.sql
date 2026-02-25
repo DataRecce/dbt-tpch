@@ -26,6 +26,6 @@ select
 from
     {{ ref('fct_orders_items') }} f
 where
-    f.ship_date <= cast({{ var('max_ship_date') }} as date) - interval 90 day
+    f.ship_date <= cast({{ var('max_ship_date') }} as date) - interval '90 day'
 group by
     1,2    
