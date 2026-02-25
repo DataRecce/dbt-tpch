@@ -8,11 +8,20 @@ Usage:
     uv run python scripts/detect_base_mode.py --manifest path/to/manifest.json
     uv run python scripts/detect_base_mode.py --json                   # machine-readable output
 
+Root cause of false alarms:
+    Incremental models contain conditional logic (is_incremental()) that produces
+    DIFFERENT SQL depending on build context — existing table state, build time,
+    target name. Two environments built under different conditions run different
+    queries against the same source data, producing different results.
+
+    This is NOT about "data accumulation" or "data volume." It's about
+    non-deterministic SQL generation from conditional Jinja logic.
+
 Detection signals:
-    1. Incremental models          → strong signal for isolated base
-    2. Sources with event_time     → enables --sample, makes isolated base feasible
-    3. Materialization mix         → all views = shared base fine
-    4. Model count / complexity    → large projects benefit more from isolation
+    1. Incremental/snapshot models  → contain is_incremental() conditional logic
+    2. Sources with event_time      → enables --sample for deterministic windows
+    3. Materialization mix          → all views/tables = deterministic output
+    4. Model count / complexity     → larger projects amplify the false alarm noise
 """
 
 import argparse
@@ -36,17 +45,30 @@ def analyze_models(manifest: dict) -> dict:
     models = {}
     materialization_counts = {"table": 0, "view": 0, "ephemeral": 0, "incremental": 0, "other": 0}
     incremental_models = []
+    snapshot_models = []
+
+    project_name = manifest.get("metadata", {}).get("project_name")
 
     for unique_id, node in manifest.get("nodes", {}).items():
-        if node.get("resource_type") != "model":
+        resource_type = node.get("resource_type")
+        if resource_type not in ("model", "snapshot"):
             continue
         # Only count models from the root project, not packages
-        if node.get("package_name") != manifest.get("metadata", {}).get("project_name"):
+        if node.get("package_name") != project_name:
+            continue
+
+        name = node.get("name", unique_id)
+        schema_path = node.get("path", "")
+
+        if resource_type == "snapshot":
+            snapshot_models.append({
+                "name": name,
+                "path": schema_path,
+                "strategy": node.get("config", {}).get("strategy"),
+            })
             continue
 
         mat = node.get("config", {}).get("materialized", "unknown")
-        name = node.get("name", unique_id)
-        schema_path = node.get("path", "")
 
         if mat in materialization_counts:
             materialization_counts[mat] += 1
@@ -60,18 +82,18 @@ def analyze_models(manifest: dict) -> dict:
         }
 
         if mat == "incremental":
-            inc_config = {
+            incremental_models.append({
                 "name": name,
                 "path": schema_path,
                 "strategy": node.get("config", {}).get("incremental_strategy"),
                 "unique_key": node.get("config", {}).get("unique_key"),
-            }
-            incremental_models.append(inc_config)
+            })
 
     return {
         "total_models": len(models),
         "materialization_counts": materialization_counts,
         "incremental_models": incremental_models,
+        "snapshot_models": snapshot_models,
         "models": models,
     }
 
@@ -109,12 +131,20 @@ def analyze_sources(manifest: dict) -> dict:
 
 
 def classify(model_analysis: dict, source_analysis: dict) -> dict:
-    """Classify the project and recommend base mode."""
+    """Classify the project and recommend base mode.
+
+    The core question: does the project contain models with conditional logic
+    that makes SQL output dependent on build context (time, existing state,
+    target)? If yes, two environments built under different conditions will
+    produce different results — causing false alarm diffs in Recce.
+    """
     signals = []
     recommendation = "shared_base"
     confidence = "high"
 
     inc_count = model_analysis["materialization_counts"]["incremental"]
+    snap_count = len(model_analysis["snapshot_models"])
+    conditional_count = inc_count + snap_count
     total = model_analysis["total_models"]
     table_count = model_analysis["materialization_counts"]["table"]
     view_count = model_analysis["materialization_counts"]["view"]
@@ -124,29 +154,42 @@ def classify(model_analysis: dict, source_analysis: dict) -> dict:
         else 0
     )
 
-    # Signal 1: Incremental models (strongest signal)
-    if inc_count > 0:
-        inc_pct = inc_count / total * 100
+    # Signal 1: Models with conditional logic (strongest signal)
+    # Incremental models use is_incremental() which forks SQL based on:
+    #   - Whether the target table already exists (state-dependent)
+    #   - Often combined with current_date()/current_timestamp() (time-dependent)
+    #   - Sometimes with target.name checks (target-dependent)
+    # Snapshots use similar conditional logic for SCD history tracking.
+    if conditional_count > 0:
+        parts = []
+        if inc_count > 0:
+            parts.append(f"{inc_count} incremental")
+        if snap_count > 0:
+            parts.append(f"{snap_count} snapshot")
+        detail = f"{' + '.join(parts)} model(s) with conditional logic"
+
         signals.append({
-            "signal": "incremental_models",
-            "value": inc_count,
-            "detail": f"{inc_count} incremental model(s) ({inc_pct:.0f}% of project)",
+            "signal": "conditional_models",
+            "value": conditional_count,
+            "detail": detail,
             "weight": "strong",
             "direction": "isolated_base",
-            "reason": "Incremental models accumulate data over time. Shared base (production) "
-                       "has full history while PR current has only recent data, causing "
-                       "false alarms in row count and value diffs.",
+            "reason": "These models contain is_incremental() or snapshot logic that produces "
+                       "different SQL depending on build context (existing table state, build "
+                       "time, target name). Two environments built under different conditions "
+                       "will run different queries → different results → false alarm diffs.",
         })
         recommendation = "isolated_base"
     else:
         signals.append({
-            "signal": "incremental_models",
+            "signal": "conditional_models",
             "value": 0,
-            "detail": "No incremental models found",
+            "detail": "No incremental or snapshot models found",
             "weight": "strong",
             "direction": "shared_base",
-            "reason": "Without incremental models, base and current environments "
-                       "produce the same data when given the same input.",
+            "reason": "Without conditional logic (is_incremental, snapshots), all models "
+                       "produce deterministic SQL. Same source data → same result regardless "
+                       "of when or where the build runs.",
         })
 
     # Signal 2: Materialization profile
@@ -154,20 +197,21 @@ def classify(model_analysis: dict, source_analysis: dict) -> dict:
         signals.append({
             "signal": "all_views",
             "value": True,
-            "detail": "All models are views — no materialized data to diverge",
+            "detail": "All models are views — recomputed on read, no stored state",
             "weight": "moderate",
             "direction": "shared_base",
-            "reason": "Views are recomputed on read; no stored state to diverge between environments.",
+            "reason": "Views generate deterministic SQL with no conditional logic. "
+                       "Output depends only on current source data, not build history.",
         })
-    elif table_count > 0:
+    elif table_count > 0 and conditional_count == 0:
         signals.append({
             "signal": "table_models",
             "value": table_count,
-            "detail": f"{table_count} table model(s) — full refresh on each build",
+            "detail": f"{table_count} table model(s) — deterministic full refresh",
             "weight": "weak",
             "direction": "shared_base",
-            "reason": "Table models do full refresh. With the same source data, "
-                       "base and current produce identical results.",
+            "reason": "Table models generate the same SQL every build (no conditional "
+                       "logic). Same source data → identical results in any environment.",
         })
 
     # Signal 3: event_time coverage (enables --sample feasibility)
@@ -180,7 +224,8 @@ def classify(model_analysis: dict, source_analysis: dict) -> dict:
                 "weight": "moderate",
                 "direction": "enables_isolation",
                 "reason": "Full event_time coverage means --sample can filter all sources "
-                           "to a consistent time window, making isolated base builds fast and deterministic.",
+                           "to a consistent time window, making isolated base builds fast "
+                           "and deterministic.",
             })
         elif event_time_pct > 0:
             signals.append({
@@ -190,8 +235,8 @@ def classify(model_analysis: dict, source_analysis: dict) -> dict:
                            f"sources have event_time",
                 "weight": "weak",
                 "direction": "partial_isolation",
-                "reason": "Partial event_time coverage means --sample will only filter some sources. "
-                           "Tables without event_time will still get full data.",
+                "reason": "Partial event_time coverage means --sample will only filter some "
+                           "sources. Sources without event_time will still get full data.",
             })
         else:
             signals.append({
@@ -201,7 +246,7 @@ def classify(model_analysis: dict, source_analysis: dict) -> dict:
                 "weight": "moderate",
                 "direction": "blocks_sample",
                 "reason": "Without event_time on sources, --sample cannot be used. "
-                           "Isolated base would require full rebuilds or alternative filtering.",
+                           "Isolated base would require full rebuilds.",
             })
 
     # Signal 4: Project scale
@@ -209,21 +254,22 @@ def classify(model_analysis: dict, source_analysis: dict) -> dict:
         signals.append({
             "signal": "project_scale",
             "value": total,
-            "detail": f"{total} models — large project benefits more from isolation",
+            "detail": f"{total} models — more surface area for false alarm noise",
             "weight": "weak",
             "direction": "isolated_base",
-            "reason": "Larger projects have more surface area for false alarms. "
-                       "Isolated base reduces noise across all comparisons.",
+            "reason": "Larger projects amplify the impact of conditional models: "
+                       "downstream models inherit the divergent data, spreading "
+                       "false alarm diffs across more tables.",
         })
 
     # Determine confidence
-    if inc_count > 0 and event_time_pct == 100:
+    if conditional_count > 0 and event_time_pct == 100:
         confidence = "high"
         recommendation = "isolated_base"
-    elif inc_count > 0 and event_time_pct < 100:
+    elif conditional_count > 0 and event_time_pct < 100:
         confidence = "medium"
         recommendation = "isolated_base"
-    elif inc_count == 0:
+    elif conditional_count == 0:
         confidence = "high"
         recommendation = "shared_base"
 
@@ -249,13 +295,14 @@ def format_report(
     conf = classification["confidence"]
     if rec == "isolated_base":
         lines.append(f"  RECOMMENDATION: Isolated Base ({conf} confidence)")
-        lines.append("  Your project has characteristics that cause false alarms")
-        lines.append("  with a shared production base. Use isolated base mode")
-        lines.append("  with --sample for accurate PR comparisons.")
+        lines.append("  Your project has models with conditional logic")
+        lines.append("  (is_incremental/snapshots) that produce different SQL")
+        lines.append("  depending on build context. Use isolated base mode")
+        lines.append("  so both environments run the same deterministic SQL.")
     else:
         lines.append(f"  RECOMMENDATION: Shared Base ({conf} confidence)")
-        lines.append("  Your project works well with the default shared base.")
-        lines.append("  No special CI configuration needed.")
+        lines.append("  All models produce deterministic SQL — no conditional")
+        lines.append("  logic that varies by build context. Shared base is fine.")
 
     lines.append("")
     lines.append("-" * 60)
@@ -265,6 +312,8 @@ def format_report(
     lines.append(f"  Models: {model_analysis['total_models']} total")
     lines.append(f"    table: {mc['table']}  view: {mc['view']}  "
                  f"ephemeral: {mc['ephemeral']}  incremental: {mc['incremental']}")
+    if model_analysis["snapshot_models"]:
+        lines.append(f"    snapshots: {len(model_analysis['snapshot_models'])}")
     lines.append("")
 
     # Source summary
@@ -277,12 +326,15 @@ def format_report(
         lines.append(f"    missing event_time: {', '.join(missing)}")
     lines.append("")
 
-    # Incremental models
+    # Models with conditional logic
     if model_analysis["incremental_models"]:
-        lines.append("  Incremental models:")
+        lines.append("  Models with conditional logic:")
         for m in model_analysis["incremental_models"]:
             strategy = m.get("strategy") or "default"
-            lines.append(f"    - {m['name']} (strategy: {strategy})")
+            lines.append(f"    - {m['name']} (incremental, strategy: {strategy})")
+        for m in model_analysis["snapshot_models"]:
+            strategy = m.get("strategy") or "default"
+            lines.append(f"    - {m['name']} (snapshot, strategy: {strategy})")
         lines.append("")
 
     # Signals
@@ -326,6 +378,7 @@ def main():
                 "total": model_analysis["total_models"],
                 "materialization_counts": model_analysis["materialization_counts"],
                 "incremental_models": model_analysis["incremental_models"],
+                "snapshot_models": model_analysis["snapshot_models"],
             },
             "sources": {
                 "total": source_analysis["total_sources"],

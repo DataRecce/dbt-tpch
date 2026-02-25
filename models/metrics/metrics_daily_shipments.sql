@@ -6,10 +6,22 @@
     )
 }}
 
--- Incremental model: daily shipment metrics
--- This model demonstrates the isolated base scenario:
--- Production accumulates years of data, while a fresh PR build
--- only sees recent shipments, causing row count false alarms.
+-- Demonstrates why incremental models cause false alarms in Recce.
+--
+-- The root cause is NOT "data accumulation" — it's the conditional logic
+-- below that produces DIFFERENT SQL depending on build context:
+--
+--   is_incremental() = true  → filters from max(ship_date) in existing table
+--   is_incremental() = false → filters last N days from a reference date
+--     (N depends on target: prod gets 365 days, dev/PR gets 90 days)
+--
+-- Two environments built at different times or with different history
+-- will run different SQL → different results → false alarm diffs.
+--
+-- This mirrors real-world patterns like the fct_cmab_strategy_reward example
+-- where prod gets -8 days and dev gets -2 days from current_date().
+
+{% set reference_date = "'1998-08-02'" %}
 
 select
     oi.ship_date,
@@ -24,6 +36,10 @@ where
     oi.ship_date is not null
     {% if is_incremental() %}
     and oi.ship_date > (select max(ship_date) from {{ this }})
+    and oi.ship_date <= {{ reference_date }}::date
+    {% else %}
+    and oi.ship_date >= {{ reference_date }}::date - interval '{{ 365 if target.name == "pg-base" else 90 }} days'
+    and oi.ship_date <= {{ reference_date }}::date
     {% endif %}
 group by
     oi.ship_date
