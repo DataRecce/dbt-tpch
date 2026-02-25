@@ -2,28 +2,34 @@
 # Usage: make help
 
 SF ?= 1
+PG_CONTAINER ?= dbt-tpch-postgres
+PG_PORT ?= 5432
 
 # --- Postgres ---
 
 .PHONY: pg-up pg-down pg-reset pg-logs pg-shell pg-load
 
 pg-up: ## Start PostgreSQL server
-	docker compose up -d postgres
+	@docker start $(PG_CONTAINER) 2>/dev/null || \
+		docker run -d --name $(PG_CONTAINER) \
+			-e POSTGRES_USER=dbt -e POSTGRES_PASSWORD=dbt -e POSTGRES_DB=tpch \
+			-p $(PG_PORT):5432 \
+			postgres:16-alpine
 	@echo "Waiting for PostgreSQL to be ready..."
-	@docker compose exec postgres sh -c 'until pg_isready -U dbt -d tpch; do sleep 1; done'
-	@echo "PostgreSQL is ready on localhost:5432"
+	@until docker exec $(PG_CONTAINER) pg_isready -U dbt -d tpch -q 2>/dev/null; do sleep 1; done
+	@echo "PostgreSQL is ready on localhost:$(PG_PORT)"
 
 pg-down: ## Stop PostgreSQL server
-	docker compose down
+	docker stop $(PG_CONTAINER)
 
-pg-reset: ## Stop PostgreSQL and remove data volume
-	docker compose down -v
+pg-reset: ## Stop and remove PostgreSQL container and data
+	docker rm -f $(PG_CONTAINER) 2>/dev/null || true
 
 pg-logs: ## Tail PostgreSQL logs
-	docker compose logs -f postgres
+	docker logs -f $(PG_CONTAINER)
 
 pg-shell: ## Open psql shell
-	docker compose exec postgres psql -U dbt -d tpch
+	docker exec -it $(PG_CONTAINER) psql -U dbt -d tpch
 
 pg-load: ## Generate TPC-H data and load into Postgres (SF=$(SF))
 	uv run python scripts/generate_data_postgres.py --sf $(SF)
