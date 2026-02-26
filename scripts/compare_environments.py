@@ -14,20 +14,21 @@ import psycopg2
 
 
 def get_table_row_counts(conn, schema: str) -> dict[str, int]:
-    """Get row counts for all tables in a schema."""
+    """Get row counts for all tables and views in a schema."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema = %s AND table_type = 'BASE TABLE' "
+        "SELECT table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW') "
         "ORDER BY table_name",
         (schema,),
     )
-    tables = [row[0] for row in cur.fetchall()]
+    relations = [(row[0], row[1]) for row in cur.fetchall()]
 
     counts = {}
-    for table in tables:
-        cur.execute(f'SELECT count(*) FROM "{schema}"."{table}"')
-        counts[table] = cur.fetchone()[0]
+    for name, rel_type in relations:
+        cur.execute(f'SELECT count(*) FROM "{schema}"."{name}"')
+        tag = "(view)" if rel_type == "VIEW" else ""
+        counts[f"{name} {tag}".strip()] = cur.fetchone()[0]
     cur.close()
     return counts
 
@@ -82,14 +83,15 @@ def main():
     matches = sum(1 for r in results if r["status"] == "match")
     mismatches = sum(1 for r in results if r["status"] == "MISMATCH")
 
-    print(f"{'Table':<40} {'Base':>10} {'Current':>10} {'Diff':>10} {'%':>8} {'Status'}")
+    print(f"{'Table':<40} {'Base':>10} {'Current':>10} {'Diff':>10} {'Result'}")
     print("-" * 90)
 
     for r in results:
         status_marker = "  " if r["status"] == "match" else "!!"
+        label = f"{r['pct']:+.1f}% [{r['status']}]"
         print(
             f"{status_marker}{r['table']:<38} {r['base']:>10,} {r['current']:>10,} "
-            f"{r['diff']:>+10,} {r['pct']:>+7.1f}% {r['status']}"
+            f"{r['diff']:>+10,} {label}"
         )
 
     print("-" * 90)
