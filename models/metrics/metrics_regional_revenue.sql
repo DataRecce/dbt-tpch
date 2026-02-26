@@ -1,4 +1,12 @@
 -- Revenue by region and nation over time
+--
+-- FALSE ALARM DEMO: TABLE model with target-dependent date window.
+-- pg-base gets 7 years of history, pg-current gets 2 years.
+-- Same pattern as prod vs dev environments with different data needs.
+-- This is NOT incremental — it's a plain table with conditional logic.
+
+{% set reference_date = "'1998-08-02'" %}
+
 with orders as (
 
     select * from {{ ref('fct_orders') }}
@@ -20,4 +28,7 @@ select
 from
     orders o
     join customers c on o.customer_key = c.customer_key
+where
+    o.order_date >= {{ reference_date }}::date - interval '{{ 2555 if target.name == "pg-base" else 730 }} days'
+    and o.order_date <= {{ reference_date }}::date
 group by 1, 2, 3
